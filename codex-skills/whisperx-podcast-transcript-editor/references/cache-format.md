@@ -20,21 +20,13 @@ Cache reuse rules:
 
 - Reuse only when `block_hash` matches the current source block
 - Reuse only when `prompt_id` matches the current cleanup prompt version
-- Otherwise fall back to `needs_model` or `pass_through`
+- Otherwise fall back to `needs_model`
 
-Typical `needs_model` reasons include:
+With the all-turn refinement flow:
 
-- obvious punctuation gaps
-- repeated junk fragments
-- profile-defined replacement hits
-- noise phrase hits
-- long unbroken blocks
-
-Typical `pass_through` reasons include:
-
-- block already reads cleanly
-- no profile replacement hits
-- no suspicious markers
+- every turn defaults to `needs_model`
+- a turn becomes `from_cache` only when the exact same source block already has a cleaned result in cache
+- profile replacements applied before planning change the source block text and therefore invalidate stale cache entries automatically
 
 Typical `from_cache` behavior:
 

@@ -130,6 +130,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hf-token", default=None, help="Hugging Face token for pyannote gated model access")
     parser.add_argument("--diarize-model", default=DEFAULT_DIARIZE_MODEL, help="Pyannote diarization model name")
     parser.add_argument(
+        "--skip-diarization",
+        action="store_true",
+        help="Skip speaker diarization and emit transcript artifacts without speaker labels",
+    )
+    parser.add_argument(
         "--keep-awake",
         action=argparse.BooleanOptionalAction,
         default=(sys.platform == "darwin"),
@@ -489,7 +494,7 @@ def verify_pyannote_access(token: str, model_name: str) -> None:
         ) from exc
 
 
-def preflight(args: argparse.Namespace) -> tuple[str, str, str]:
+def preflight(args: argparse.Namespace) -> tuple[str, str, str | None]:
     missing: list[str] = []
 
     yt_dlp_bin = resolve_executable("yt-dlp")
@@ -501,7 +506,7 @@ def preflight(args: argparse.Namespace) -> tuple[str, str, str]:
         missing.append("ffmpeg")
 
     token = normalize_hf_token(args.hf_token)
-    if not token:
+    if not token and not args.skip_diarization:
         missing.append("hf-token")
 
     if missing:
@@ -509,8 +514,9 @@ def preflight(args: argparse.Namespace) -> tuple[str, str, str]:
             "dependency check failed:\n" + "\n".join(f"- missing: {item}" for item in missing)
         )
 
-    assert token is not None
-    verify_pyannote_access(token, args.diarize_model)
+    if not args.skip_diarization:
+        assert token is not None
+        verify_pyannote_access(token, args.diarize_model)
     return yt_dlp_bin or "yt-dlp", ffmpeg_bin or "ffmpeg", token
 
 
@@ -633,7 +639,7 @@ def diarization_records_from_df(diarize_df: Any) -> list[dict[str, Any]]:
     return records
 
 
-def transcribe_audio(args: argparse.Namespace, audio_path: Path, hf_token: str) -> WhisperXRunResult:
+def transcribe_audio(args: argparse.Namespace, audio_path: Path, hf_token: str | None) -> WhisperXRunResult:
     import whisperx
     from whisperx.alignment import align, load_align_model
     from whisperx.diarize import DiarizationPipeline, assign_word_speakers
@@ -692,21 +698,25 @@ def transcribe_audio(args: argparse.Namespace, audio_path: Path, hf_token: str) 
     gc.collect()
     clear_torch_cache()
 
-    log(f"running diarization with '{args.diarize_model}'")
-    diarize_model = DiarizationPipeline(
-        model_name=args.diarize_model,
-        token=hf_token,
-        device=device,
-        cache_dir=args.model_dir,
-    )
-    diarize_df = diarize_model(
-        str(audio_path),
-        min_speakers=args.min_speakers,
-        max_speakers=args.max_speakers,
-    )
-    result = assign_word_speakers(diarize_df, result, fill_nearest=False)
+    diarization_records: list[dict[str, Any]] = []
+    if args.skip_diarization:
+        log("skipping diarization; transcript will not include speaker labels")
+    else:
+        log(f"running diarization with '{args.diarize_model}'")
+        diarize_model = DiarizationPipeline(
+            model_name=args.diarize_model,
+            token=hf_token,
+            device=device,
+            cache_dir=args.model_dir,
+        )
+        diarize_df = diarize_model(
+            str(audio_path),
+            min_speakers=args.min_speakers,
+            max_speakers=args.max_speakers,
+        )
+        result = assign_word_speakers(diarize_df, result, fill_nearest=False)
+        diarization_records = diarization_records_from_df(diarize_df)
 
-    diarization_records = diarization_records_from_df(diarize_df)
     result["language"] = detected_language
     return WhisperXRunResult(
         transcript_result=result,
@@ -755,17 +765,35 @@ def fmt_ms(ms: int) -> str:
 TURN_END_PUNCT = "。！？!?…"
 TURN_INLINE_PUNCT = "，；：、,;:"
 TURN_LEADING_PUNCT = "，。！？；：、,.!?;:)]）】〉》」』”’"
-TURN_WRAP_CHARS = 100
+TURN_WRAP_CHARS = 60
+TURN_SPLIT_MAX_CHARS = 180
+TURN_SPLIT_MAX_DURATION_MS = 45_000
+TURN_SPLIT_MAX_PARTS = 2
+TURN_SPLIT_GAP_MS = 1_500
 
 
 def clean_turn_fragment(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def lightly_punctuate_fragment(text: str) -> str:
+    rendered = clean_turn_fragment(text)
+    rendered = re.sub(
+        r"(?<!^)(?<![，。！？!?…])(但是|不过|所以|然后|因为|其实|比如说|也就是说|换句话说)",
+        r"，\1",
+        rendered,
+    )
+    rendered = re.sub(r"(对吧|是吧|对不对|没错)(?![，。！？!?…])", r"\1，", rendered)
+    rendered = re.sub(r"^开玩笑(?![，。！？!?…])", "开玩笑，", rendered)
+    rendered = re.sub(r"，{2,}", "，", rendered)
+    rendered = re.sub(r"([。！？!?…])，", r"\1", rendered)
+    return rendered
+
+
 def render_turn_text(parts: list[str]) -> str:
     rendered = ""
     for raw in parts:
-        part = clean_turn_fragment(raw).strip(" ，。；;")
+        part = lightly_punctuate_fragment(raw).strip(" ，。；;")
         if not part:
             continue
         if not rendered:
@@ -866,7 +894,18 @@ def merge_segments_into_turns(segments: list[Segment]) -> list[SpeakerTurn]:
         text = clean_turn_fragment(seg.text)
         if not text and current is None:
             continue
+        current_chars = sum(len(part) for part in current.parts) if current else 0
+        should_split = False
         if current and current.speaker == seg.speaker:
+            should_split = any(
+                [
+                    seg.t0_ms - current.t1_ms > TURN_SPLIT_GAP_MS,
+                    current.t1_ms - current.t0_ms >= TURN_SPLIT_MAX_DURATION_MS,
+                    current_chars >= TURN_SPLIT_MAX_CHARS,
+                    len(current.parts) >= TURN_SPLIT_MAX_PARTS,
+                ]
+            )
+        if current and current.speaker == seg.speaker and not should_split:
             current.t1_ms = seg.t1_ms
             if text:
                 current.parts.append(text)
@@ -919,8 +958,10 @@ def transcript_markdown(
             lines.append("")
     else:
         for seg in segments:
-            ts = f"[{fmt_ms(seg.t0_ms)} - {fmt_ms(seg.t1_ms)}]"
-            lines.append(f"- {ts} {seg.text}")
+            ts = f"{fmt_ms(seg.t0_ms)} - {fmt_ms(seg.t1_ms)}"
+            lines.append(f"（{ts}）：")
+            lines.extend(wrap_turn_text(render_turn_text([seg.text])))
+            lines.append("")
 
     lines.append("")
     return "\n".join(lines)
@@ -984,6 +1025,7 @@ def execute_workflow(args: argparse.Namespace, *, input_fn: Callable[[str], str]
         {
             "generated_at": now_iso(),
             "model": args.diarize_model,
+            "skipped": bool(args.skip_diarization),
             "records": whisperx_run.diarization_records,
         },
     )

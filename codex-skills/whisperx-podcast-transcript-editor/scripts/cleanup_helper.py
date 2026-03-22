@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-PROMPT_ID = "cleanup-zh-v1-compact"
+PROMPT_ID = "cleanup-zh-v2-all-turns"
 PLAN_VERSION = 1
 CACHE_VERSION = 1
 DEFAULT_CACHE_FILENAME = ".podcast-transcript-editor-cache.json"
@@ -50,11 +50,18 @@ def split_transcript_markdown(markdown: str) -> tuple[str, list[str]]:
     return header, blocks
 
 
-def join_body_text(block: str) -> str:
+def split_block_header_body(block: str) -> tuple[str, list[str]]:
     lines = [line.rstrip() for line in block.splitlines()]
-    if len(lines) <= 1:
+    if not lines:
+        return "", []
+    return lines[0].strip(), [line for line in lines[1:] if line.strip()]
+
+
+def join_body_text(block: str) -> str:
+    _, body_lines = split_block_header_body(block)
+    if not body_lines:
         return ""
-    return "".join(line.strip() for line in lines[1:] if line.strip())
+    return "".join(line.strip() for line in body_lines)
 
 
 def count_chars(text: str) -> int:
@@ -93,6 +100,13 @@ def load_profile_context(path: Path | None) -> tuple[dict[str, str], list[str]]:
     return safe_replacements, safe_noise
 
 
+def apply_replacements(text: str, replacements: dict[str, str]) -> str:
+    rendered = text
+    for old, new in replacements.items():
+        rendered = rendered.replace(old, new)
+    return rendered
+
+
 def default_cache_path(transcript_path: Path) -> Path:
     return transcript_path.parent / DEFAULT_CACHE_FILENAME
 
@@ -127,6 +141,18 @@ def clean_header_for_output(header_text: str) -> str:
     if "- 清洗方式:" not in rendered and "- 识别语言:" in rendered:
         rendered = rendered.replace("- 识别语言:", "- 清洗方式: 忠实语义清洗\n- 识别语言:", 1)
     return rendered
+
+
+def apply_profile_replacements_to_block(block: str, replacements: dict[str, str]) -> str:
+    if not replacements:
+        return block
+    header_line, body_lines = split_block_header_body(block)
+    if not header_line:
+        return block
+    rendered_body = [apply_replacements(line, replacements) for line in body_lines]
+    if not rendered_body:
+        return header_line
+    return "\n".join([header_line, *rendered_body])
 
 
 def analyze_block(
@@ -229,15 +255,20 @@ def build_plan(
     header_text, blocks = split_transcript_markdown(markdown)
 
     rendered_blocks: list[dict[str, Any]] = []
-    stats = {"total_blocks": 0, "needs_model": 0, "pass_through": 0, "from_cache": 0}
+    stats = {"total_blocks": 0, "needs_model": 0, "from_cache": 0}
 
     for index, block in enumerate(blocks, start=1):
+        prepared_block = apply_profile_replacements_to_block(block, replacements)
         analysis = analyze_block(block, replacements=replacements, noise_phrases=noise_phrases)
-        cache_key = cache_key_for_block(block)
+        cache_key = cache_key_for_block(prepared_block)
         entry = cache.get("entries", {}).get(cache_key)
         cached_text = None
-        decision = analysis["decision"]
-        if isinstance(entry, dict) and entry.get("block_hash") == block_hash(block) and entry.get("prompt_id") == PROMPT_ID:
+        decision = "needs_model"
+        if (
+            isinstance(entry, dict)
+            and entry.get("block_hash") == block_hash(prepared_block)
+            and entry.get("prompt_id") == PROMPT_ID
+        ):
             cached_text = entry.get("cleaned_block") if isinstance(entry.get("cleaned_block"), str) else None
             if cached_text:
                 decision = "from_cache"
@@ -250,7 +281,7 @@ def build_plan(
             "reasons": analysis["reasons"],
             "char_count": analysis["char_count"],
             "header_line": analysis["header_line"],
-            "source_block": block,
+            "source_block": prepared_block,
             "cleaned_block": cached_text,
             "profile_replacement_hits": analysis["profile_replacement_hits"],
             "noise_phrase_hits": analysis["noise_phrase_hits"],
@@ -295,9 +326,6 @@ def assemble_from_plan(plan_path: Path, output_path: Path, *, model: str | None 
         source_block = block.get("source_block") if isinstance(block.get("source_block"), str) else ""
         cleaned_block = block.get("cleaned_block") if isinstance(block.get("cleaned_block"), str) else None
         cache_key = block.get("cache_key") if isinstance(block.get("cache_key"), str) else ""
-        if decision == "pass_through":
-            rendered_blocks.append(source_block)
-            continue
         if decision in {"from_cache", "needs_model"}:
             if not cleaned_block:
                 raise ValueError(f"missing cleaned_block for plan block {block.get('index')}")

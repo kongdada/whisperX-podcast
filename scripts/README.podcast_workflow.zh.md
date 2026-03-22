@@ -17,6 +17,11 @@ python3 scripts/podcast_workflow.py --url "<podcast-url>"
    `01_diarization.json`
    `01_transcript.md`
 
+其中：
+
+- `01_transcript.md` 是规则生成的结构稿，带 speaker、时间范围和较小 turn，主要给后续 LLM 精校消费
+- `02_transcript_clean.md` 才是全文最终精校稿，由 skill 在 turn 级逐块调用 LLM 产出
+
 ## 整体流程图
 
 ```mermaid
@@ -32,8 +37,8 @@ flowchart TD
     I --> J{"是否继续忠实清洗?"}
     J -- "否" --> K["结束"]
     J -- "是" --> L["$whisperx-podcast-transcript-editor"]
-    L --> M["cleanup_helper.py plan<br/>脏块筛选 + cache 命中"]
-    M --> N["仅处理 needs_model 的块"]
+    L --> M["cleanup_helper.py plan<br/>全部 turn 建计划 + cache 命中"]
+    M --> N["逐 turn 调用 LLM<br/>仅跳过 from_cache"]
     N --> O["assemble<br/>生成 02_transcript_clean.md"]
 ```
 
@@ -42,6 +47,14 @@ flowchart TD
 ```bash
 --no-keep-awake
 ```
+
+如果你只想先把正文转出来，别让 `pyannote` 的说话人分离拖慢整个流程，可以加：
+
+```bash
+--skip-diarization
+```
+
+这时脚本仍会输出 `01_diarization.json`，但其中会标记 `"skipped": true`，正文也会退回成只有时间范围、没有说话人名的段落。
 
 前置条件：
 

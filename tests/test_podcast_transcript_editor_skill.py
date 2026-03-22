@@ -77,6 +77,7 @@ class CleanupHelperTests(unittest.TestCase):
             plan = ch.build_plan(transcript_path, cache_path=cache_path)
             self.assertEqual(plan["header_text"], header)
             self.assertEqual(plan["stats"]["from_cache"], 1)
+            self.assertEqual(plan["stats"]["needs_model"], 1)
             dirty = plan["blocks"][1]
             self.assertEqual(dirty["decision"], "from_cache")
             self.assertIsNotNone(dirty["cleaned_block"])
@@ -103,6 +104,19 @@ class CleanupHelperTests(unittest.TestCase):
             block = plan["blocks"][0]
             self.assertEqual(block["decision"], "needs_model")
             self.assertIn("profile_replacement_hits", block["reasons"])
+            self.assertIn("知行小酒馆", block["source_block"])
+
+    def test_build_plan_marks_clean_block_needs_model_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            transcript_path = tmp / "01_transcript.md"
+            transcript_path.write_text(TRANSCRIPT, encoding="utf-8")
+
+            plan = ch.build_plan(transcript_path)
+
+            self.assertEqual(plan["stats"]["needs_model"], 2)
+            self.assertEqual(plan["stats"]["from_cache"], 0)
+            self.assertEqual([block["decision"] for block in plan["blocks"]], ["needs_model", "needs_model"])
 
     def test_assemble_writes_cleaned_output_and_updates_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -119,14 +133,14 @@ class CleanupHelperTests(unittest.TestCase):
                 "cache_path": str(cache_path),
                 "profile_path": None,
                 "header_text": "# 转写稿\n\n- 生成时间: now\n- 来源链接: x\n- 集标题: 示例\n- 识别语言: zh\n\n## 正文\n\n",
-                "stats": {"total_blocks": 2, "needs_model": 1, "pass_through": 1, "from_cache": 0},
+                "stats": {"total_blocks": 2, "needs_model": 2, "from_cache": 0},
                 "blocks": [
                     {
                         "index": 1,
                         "cache_key": "aaa",
-                        "decision": "pass_through",
+                        "decision": "needs_model",
                         "source_block": "张潇雨（00:00:00 - 00:00:10）：\n这是一段已经很干净的表达。",
-                        "cleaned_block": None,
+                        "cleaned_block": "张潇雨（00:00:00 - 00:00:10）：\n这是一段已经很干净的表达。",
                         "header_line": "张潇雨（00:00:00 - 00:00:10）：",
                     },
                     {
@@ -149,8 +163,39 @@ class CleanupHelperTests(unittest.TestCase):
             self.assertIn("这个事情就是特别重要。", rendered)
 
             cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.assertIn("aaa", cache["entries"])
             self.assertIn("bbb", cache["entries"])
             self.assertEqual(cache["entries"]["bbb"]["model"], "gpt-4.1")
+
+    def test_assemble_rejects_pass_through_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            plan_path = tmp / "cleanup_plan.json"
+            output_path = tmp / "02_transcript_clean.md"
+            plan = {
+                "version": ch.PLAN_VERSION,
+                "created_at": "now",
+                "prompt_id": ch.PROMPT_ID,
+                "transcript_path": str(tmp / "01_transcript.md"),
+                "cache_path": str(tmp / ch.DEFAULT_CACHE_FILENAME),
+                "profile_path": None,
+                "header_text": "# 转写稿\n\n- 生成时间: now\n- 来源链接: x\n- 集标题: 示例\n- 识别语言: zh\n\n## 正文\n\n",
+                "stats": {"total_blocks": 1, "needs_model": 0, "from_cache": 0},
+                "blocks": [
+                    {
+                        "index": 1,
+                        "cache_key": "aaa",
+                        "decision": "pass_through",
+                        "source_block": "张潇雨（00:00:00 - 00:00:10）：\n这是一段已经很干净的表达。",
+                        "cleaned_block": None,
+                        "header_line": "张潇雨（00:00:00 - 00:00:10）：",
+                    }
+                ],
+            }
+            plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "unknown decision: pass_through"):
+                ch.assemble_from_plan(plan_path, output_path, model="gpt-4.1")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,43 @@
+{
+  "name": "no69-meiyou-genghao",
+  "match": {
+    "input_url_regex": "xiaoyuzhoufm\\.com/episode/6972e1d5109824f9e11161b1",
+    "title_regex": "^No\\.69：没有更好的生活$"
+  },
+  "speaker_name_map": {
+    "SPEAKER_00": "张小宇",
+    "SPEAKER_01": "孟岩",
+    "SPEAKER_02": "许哲"
+  },
+  "noise_phrases": [],
+  "replacements": {
+    "许正老师": "许哲老师",
+    "许罗老师": "许哲老师",
+    "徐老师": "许老师",
+    "薛老师": "许老师",
+    "徐德老师": "许哲老师",
+    "塔拉布": "塔勒布",
+    "塔勒乌": "塔勒布",
+    "卡尔波普尔": "卡尔·波普尔",
+    "卡尔伯普尔": "卡尔·波普尔",
+    "鲍普尔": "波普尔",
+    "休莫": "休谟",
+    "Mark Spiesnasal": "Mark Spitznagel",
+    "MarkSpiesnasal": "Mark Spitznagel",
+    "Universa": "Universa",
+    "巴布特": "巴菲特",
+    "孟严": "孟岩",
+    "有肉情": "有知有行",
+    "龟毛兔脚": "龟毛兔角",
+    "hating": "hedging",
+    "眼神病": "衍生品",
+    "正途性": "正凸性",
+    "KDJMACD": "KDJ、MACD",
+    "子微斗数": "紫微斗数",
+    "信守运气": "新手运气",
+    "相量机": "向量机",
+    "大蝶": "大跌",
+    "经验的超级": "经验的超集",
+    "满血护佛": "满血复活"
+  }
+}

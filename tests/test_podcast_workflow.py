@@ -126,6 +126,23 @@ class PodcastWorkflowUnitTests(unittest.TestCase):
         self.assertIn("\n\n雨白（00:00:02 - 00:00:03）：\n收到。", rendered)
         self.assertNotIn("SPEAKER_00", rendered)
 
+    def test_merge_segments_into_turns_splits_long_same_speaker_runs(self) -> None:
+        segments = [
+            pw.Segment(t0_ms=0, t1_ms=1000, text="第一段", speaker="SPEAKER_00"),
+            pw.Segment(t0_ms=1000, t1_ms=2000, text="第二段", speaker="SPEAKER_00"),
+            pw.Segment(t0_ms=2000, t1_ms=3000, text="第三段", speaker="SPEAKER_00"),
+        ]
+
+        turns = pw.merge_segments_into_turns(segments)
+
+        self.assertEqual(len(turns), 2)
+        self.assertEqual(turns[0].parts, ["第一段", "第二段"])
+        self.assertEqual(turns[1].parts, ["第三段"])
+
+    def test_lightly_punctuate_fragment_adds_commas_for_common_discourse_markers(self) -> None:
+        rendered = pw.lightly_punctuate_fragment("开玩笑然后其实这事没错对吧我们再说")
+        self.assertEqual(rendered, "开玩笑，然后，其实这事没错，对吧，我们再说")
+
     def test_transcript_markdown_wraps_long_turn_body(self) -> None:
         text = (
             "这是第一句，主要是为了测试长段落自动换行。"
@@ -149,13 +166,27 @@ class PodcastWorkflowUnitTests(unittest.TestCase):
             self.assertLessEqual(len(line), pw.TURN_WRAP_CHARS)
 
     def test_preflight_requires_hf_token(self) -> None:
-        args = Namespace(hf_token=None, diarize_model=pw.DEFAULT_DIARIZE_MODEL)
+        args = Namespace(hf_token=None, diarize_model=pw.DEFAULT_DIARIZE_MODEL, skip_diarization=False)
         with (
             mock.patch.object(pw, "resolve_executable", side_effect=lambda name: f"/usr/bin/{name}"),
             mock.patch.dict(pw.os.environ, {}, clear=True),
         ):
             with self.assertRaisesRegex(pw.WorkflowError, "hf-token"):
                 pw.preflight(args)
+
+    def test_preflight_allows_missing_hf_token_when_skipping_diarization(self) -> None:
+        args = Namespace(hf_token=None, diarize_model=pw.DEFAULT_DIARIZE_MODEL, skip_diarization=True)
+        with (
+            mock.patch.object(pw, "resolve_executable", side_effect=lambda name: f"/usr/bin/{name}"),
+            mock.patch.object(pw, "verify_pyannote_access") as verify_mock,
+            mock.patch.dict(pw.os.environ, {}, clear=True),
+        ):
+            yt_dlp_bin, ffmpeg_bin, token = pw.preflight(args)
+
+        self.assertEqual(yt_dlp_bin, "/usr/bin/yt-dlp")
+        self.assertEqual(ffmpeg_bin, "/usr/bin/ffmpeg")
+        self.assertIsNone(token)
+        verify_mock.assert_not_called()
 
     def test_should_keep_awake_only_on_macos_and_first_run(self) -> None:
         args = Namespace(keep_awake=True)
@@ -218,6 +249,7 @@ class PodcastWorkflowExecutionTests(unittest.TestCase):
             max_speakers=None,
             hf_token="hf_xxx",
             diarize_model=pw.DEFAULT_DIARIZE_MODEL,
+            skip_diarization=False,
             keep_awake=False,
             verbose=True,
             print_progress=False,
@@ -279,6 +311,55 @@ class PodcastWorkflowExecutionTests(unittest.TestCase):
 
             diarization = json.loads((out_dir / "01_diarization.json").read_text(encoding="utf-8"))
             self.assertEqual(diarization["records"][0]["speaker"], "SPEAKER_00")
+
+    def test_mocked_integration_skip_diarization_still_generates_transcript_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as out_root, tempfile.TemporaryDirectory() as fake_tmp:
+            args = self._make_args(out_root, episode_index=1)
+            args.hf_token = None
+            args.skip_diarization = True
+            src = Path(fake_tmp) / "source.webm"
+            src.write_bytes(b"source")
+
+            def fake_transcode(_ffmpeg, _src, dst, retries=None):
+                Path(dst).write_bytes(b"mp3")
+
+            whisperx_result = pw.WhisperXRunResult(
+                transcript_result={
+                    "language": "zh",
+                    "segments": [
+                        {"start": 0.0, "end": 1.0, "text": "你好，世界"},
+                    ],
+                },
+                diarization_records=[],
+                language="zh",
+            )
+
+            episode_info = {
+                "title": "第1期",
+                "webpage_url": "https://example.com/ep1",
+                "duration": 60,
+            }
+
+            with (
+                mock.patch.object(pw, "preflight", return_value=("yt-dlp", "ffmpeg", None)),
+                mock.patch.object(pw, "inspect_source", return_value=episode_info),
+                mock.patch.object(pw, "download_audio", return_value=src),
+                mock.patch.object(pw, "transcode_to_mp3", side_effect=fake_transcode),
+                mock.patch.object(pw, "transcribe_audio", return_value=whisperx_result),
+            ):
+                out_dir = pw.execute_workflow(args)
+
+            self.assertTrue((out_dir / "audio.mp3").exists())
+            self.assertTrue((out_dir / "01_transcript.md").exists())
+            self.assertTrue((out_dir / "01_transcript.json").exists())
+            self.assertTrue((out_dir / "01_diarization.json").exists())
+
+            transcript = (out_dir / "01_transcript.md").read_text(encoding="utf-8")
+            self.assertIn("（00:00:00 - 00:00:01）：\n你好，世界。", transcript)
+
+            diarization = json.loads((out_dir / "01_diarization.json").read_text(encoding="utf-8"))
+            self.assertTrue(diarization["skipped"])
+            self.assertEqual(diarization["records"], [])
 
 
 if __name__ == "__main__":
