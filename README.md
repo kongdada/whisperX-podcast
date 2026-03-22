@@ -111,6 +111,48 @@ uv sync --all-extras --dev
 
 You may also need to install ffmpeg, rust etc. Follow openAI instructions here https://github.com/openai/whisper#setup.
 
+### Syncing This Fork With Upstream
+
+If you are using this repository as a customized fork, keep your own GitHub repository as `origin` and the original WhisperX repository as `upstream`.
+
+Check current remotes:
+
+```bash
+git remote -v
+```
+
+Recommended layout:
+
+```bash
+origin   git@github.com:<you>/whisperX-podcast.git
+upstream https://github.com/m-bain/whisperX
+```
+
+To sync upstream code updates into your fork:
+
+```bash
+git fetch upstream
+git checkout -b codex/sync-upstream-YYYY-MM-DD main
+git merge upstream/main
+python3 -m unittest tests.test_podcast_workflow tests.test_podcast_transcript_editor_skill
+```
+
+If the merge is clean and tests pass, merge that branch back into `main` and push to `origin`.
+
+For model updates:
+
+- if you only want a different default model, update `scripts/podcast_workflow.py` or pass `--model <name>` at runtime
+- if upstream adds new model support or dependency changes, sync upstream first, reinstall dependencies, then rerun the tests above
+
+If you are using the local podcast workflow, also re-check:
+
+- `scripts/podcast_workflow.py`
+- `scripts/README.podcast_workflow.zh.md`
+- `scripts/podcast_profiles/`
+- `codex-skills/whisperx-podcast-transcript-editor/`
+
+These files are fork-specific and may need a manual pass after upstream merges.
+
 ### Speaker Diarization
 
 To **enable Speaker Diarization**, include your Hugging Face access token (read) that you can generate from [Here](https://huggingface.co/settings/tokens) after the `--hf_token` argument and accept the user agreement for the [speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1) model.
