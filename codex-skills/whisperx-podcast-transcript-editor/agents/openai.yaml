@@ -1,0 +1,4 @@
+interface:
+  display_name: "WhisperX Podcast Transcript Editor"
+  short_description: "Download and faithfully clean podcast transcripts with WhisperX"
+  default_prompt: "Use $whisperx-podcast-transcript-editor to turn a podcast URL or transcript into a faithful cleaned transcript."
