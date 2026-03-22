@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +14,13 @@ ch = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
 sys.modules[SPEC.name] = ch
 SPEC.loader.exec_module(ch)
+
+RUNNER_PATH = REPO_ROOT / "codex-skills" / "whisperx-podcast-transcript-editor" / "scripts" / "run_cleanup_codex.py"
+RUNNER_SPEC = importlib.util.spec_from_file_location("run_cleanup_codex", RUNNER_PATH)
+runner = importlib.util.module_from_spec(RUNNER_SPEC)
+assert RUNNER_SPEC and RUNNER_SPEC.loader
+sys.modules[RUNNER_SPEC.name] = runner
+RUNNER_SPEC.loader.exec_module(runner)
 
 
 TRANSCRIPT = (
@@ -196,6 +204,105 @@ class CleanupHelperTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "unknown decision: pass_through"):
                 ch.assemble_from_plan(plan_path, output_path, model="gpt-4.1")
+
+    def test_assemble_fallback_source_renders_without_caching_unfinished_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            cache_path = tmp / ch.DEFAULT_CACHE_FILENAME
+            plan_path = tmp / "cleanup_plan.json"
+            output_path = tmp / "02_transcript_clean.md"
+            plan = {
+                "version": ch.PLAN_VERSION,
+                "created_at": "now",
+                "prompt_id": ch.PROMPT_ID,
+                "transcript_path": str(tmp / "01_transcript.md"),
+                "cache_path": str(cache_path),
+                "profile_path": None,
+                "header_text": "# 转写稿\n\n- 生成时间: now\n- 来源链接: x\n- 集标题: 示例\n- 识别语言: zh\n\n## 正文\n\n",
+                "stats": {"total_blocks": 2, "needs_model": 2, "from_cache": 0},
+                "blocks": [
+                    {
+                        "index": 1,
+                        "cache_key": "aaa",
+                        "decision": "needs_model",
+                        "source_block": "张潇雨（00:00:00 - 00:00:10）：\n这是一段已经很干净的表达。",
+                        "cleaned_block": "张潇雨（00:00:00 - 00:00:10）：\n这是一段已经很干净的表达。",
+                        "header_line": "张潇雨（00:00:00 - 00:00:10）：",
+                    },
+                    {
+                        "index": 2,
+                        "cache_key": "bbb",
+                        "decision": "needs_model",
+                        "source_block": "雨白（00:00:10 - 00:00:40）：\n这个事情就是就是就是特别重要。",
+                        "cleaned_block": None,
+                        "header_line": "雨白（00:00:10 - 00:00:40）：",
+                    },
+                ],
+            }
+            plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            ch.assemble_from_plan(plan_path, output_path, model="gpt-4.1", fallback_source=True)
+
+            rendered = output_path.read_text(encoding="utf-8")
+            self.assertIn("这是一段已经很干净的表达。", rendered)
+            self.assertIn("这个事情就是就是就是特别重要。", rendered)
+
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.assertIn("aaa", cache["entries"])
+            self.assertNotIn("bbb", cache["entries"])
+
+    def test_runner_resumes_and_assembles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            transcript_path = tmp / "01_transcript.md"
+            plan_path = tmp / "cleanup_plan.json"
+            output_path = tmp / "02_transcript_clean.md"
+            transcript_path.write_text(TRANSCRIPT, encoding="utf-8")
+            plan = {
+                "version": ch.PLAN_VERSION,
+                "created_at": "now",
+                "prompt_id": ch.PROMPT_ID,
+                "transcript_path": str(transcript_path),
+                "cache_path": str(tmp / ch.DEFAULT_CACHE_FILENAME),
+                "profile_path": None,
+                "header_text": "# 转写稿\n\n- 生成时间: now\n- 来源链接: x\n- 集标题: 示例\n- 识别语言: zh\n\n## 正文\n\n",
+                "stats": {"total_blocks": 2, "needs_model": 2, "from_cache": 0},
+                "blocks": [
+                    {
+                        "index": 1,
+                        "cache_key": "aaa",
+                        "decision": "needs_model",
+                        "source_block": "张潇雨（00:00:00 - 00:00:10）：\n这是一段已经很干净的表达。",
+                        "cleaned_block": "张潇雨（00:00:00 - 00:00:10）：\n这是一段已经很干净的表达。",
+                        "header_line": "张潇雨（00:00:00 - 00:00:10）：",
+                    },
+                    {
+                        "index": 2,
+                        "cache_key": "bbb",
+                        "decision": "needs_model",
+                        "source_block": "雨白（00:00:10 - 00:00:40）：\n这个事情就是就是就是特别重要。",
+                        "cleaned_block": None,
+                        "header_line": "雨白（00:00:10 - 00:00:40）：",
+                    },
+                ],
+            }
+            plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            def fake_run_codex_exec(prompt: str, *, model: str, output_path: Path) -> str:
+                output_path.write_text(
+                    "雨白（00:00:10 - 00:00:40）：\n这个事情就是特别重要。",
+                    encoding="utf-8",
+                )
+                return output_path.read_text(encoding="utf-8")
+
+            with mock.patch.object(runner, "run_codex_exec", side_effect=fake_run_codex_exec):
+                stats = runner.run_cleanup_plan(plan_path, output_path=output_path, model="gpt-5.4")
+
+            updated = json.loads(plan_path.read_text(encoding="utf-8"))
+            self.assertEqual(stats["processed"], 1)
+            self.assertEqual(updated["blocks"][1]["cleaned_block"], "雨白（00:00:10 - 00:00:40）：\n这个事情就是特别重要。")
+            rendered = output_path.read_text(encoding="utf-8")
+            self.assertIn("这个事情就是特别重要。", rendered)
 
 
 if __name__ == "__main__":

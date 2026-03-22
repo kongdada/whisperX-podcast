@@ -65,26 +65,42 @@ Before editing, read:
 - [references/cleanup-prompt.zh.txt](references/cleanup-prompt.zh.txt)
 - [references/cache-format.md](references/cache-format.md)
 
-Send every block where `decision == "needs_model"`.
+Use the bundled batch runner as the default execution path:
 
-Skip only blocks where:
+```bash
+python3 codex-skills/whisperx-podcast-transcript-editor/scripts/run_cleanup_codex.py \
+  "<path-to-cleanup-plan.json>" \
+  --output "<path-to-02_transcript_clean.md>" \
+  --model "gpt-5.4"
+```
 
-- `decision == "from_cache"`
+This runner:
 
-Use the fixed prompt in [references/cleanup-prompt.zh.txt](references/cleanup-prompt.zh.txt) for each dirty block.
+- sends every unfinished `needs_model` block to `codex exec`
+- writes each returned `cleaned_block` back into the plan immediately
+- resumes cleanly if rerun after an interruption
+- assembles `02_transcript_clean.md` at the end
+
+Useful options:
+
+- `--limit 20` to process only the next 20 unfinished blocks
+- `--start-index` / `--end-index` to clean a slice of the transcript
+- `--no-assemble` to stop after writing cleaned blocks into the plan
+- `--fallback-source` to assemble a preview even when some blocks are still unfinished
 
 ## Assemble Output
 
-After the model returns cleaned text for each dirty block, write the cleaned block back into the plan JSON under `cleaned_block`, then assemble:
+If you already have a partially completed plan and only want to assemble the current best draft, use:
 
 ```bash
 python3 codex-skills/whisperx-podcast-transcript-editor/scripts/cleanup_helper.py assemble \
   "<path-to-cleanup-plan.json>" \
   --output "<path-to-02_transcript_clean.md>" \
-  --model "<model-name>"
+  --model "<model-name>" \
+  --fallback-source
 ```
 
-This reuses cache hits, writes `02_transcript_clean.md`, and updates `.podcast-transcript-editor-cache.json`.
+`--fallback-source` preserves unfinished blocks as their current `source_block` text and does not cache those fallbacks as if they were model-cleaned.
 
 ## Output Rules
 

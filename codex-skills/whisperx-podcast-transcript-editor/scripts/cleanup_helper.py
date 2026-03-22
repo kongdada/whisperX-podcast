@@ -311,7 +311,13 @@ def write_plan(plan: dict[str, Any], output_path: Path | None) -> None:
     output_path.write_text(rendered, encoding="utf-8")
 
 
-def assemble_from_plan(plan_path: Path, output_path: Path, *, model: str | None = None) -> Path:
+def assemble_from_plan(
+    plan_path: Path,
+    output_path: Path,
+    *,
+    model: str | None = None,
+    fallback_source: bool = False,
+) -> Path:
     plan = load_json(plan_path)
     blocks = plan.get("blocks") if isinstance(plan.get("blocks"), list) else []
     header_text = plan.get("header_text") if isinstance(plan.get("header_text"), str) else ""
@@ -327,17 +333,21 @@ def assemble_from_plan(plan_path: Path, output_path: Path, *, model: str | None 
         cleaned_block = block.get("cleaned_block") if isinstance(block.get("cleaned_block"), str) else None
         cache_key = block.get("cache_key") if isinstance(block.get("cache_key"), str) else ""
         if decision in {"from_cache", "needs_model"}:
-            if not cleaned_block:
-                raise ValueError(f"missing cleaned_block for plan block {block.get('index')}")
-            rendered_blocks.append(cleaned_block)
-            cache.setdefault("entries", {})[cache_key] = {
-                "block_hash": block_hash(source_block),
-                "prompt_id": PROMPT_ID,
-                "cleaned_block": cleaned_block,
-                "source_header": block.get("header_line"),
-                "model": model,
-                "updated_at": now_iso(),
-            }
+            if cleaned_block:
+                rendered_blocks.append(cleaned_block)
+                cache.setdefault("entries", {})[cache_key] = {
+                    "block_hash": block_hash(source_block),
+                    "prompt_id": PROMPT_ID,
+                    "cleaned_block": cleaned_block,
+                    "source_header": block.get("header_line"),
+                    "model": model,
+                    "updated_at": now_iso(),
+                }
+                continue
+            if fallback_source and source_block:
+                rendered_blocks.append(source_block)
+                continue
+            raise ValueError(f"missing cleaned_block for plan block {block.get('index')}")
             continue
         raise ValueError(f"unknown decision: {decision}")
 
@@ -361,6 +371,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     assemble_parser.add_argument("plan", help="Path to cleanup plan JSON")
     assemble_parser.add_argument("--output", required=True, help="Output path for 02_transcript_clean.md")
     assemble_parser.add_argument("--model", default=None, help="Model name to record in cache entries")
+    assemble_parser.add_argument(
+        "--fallback-source",
+        action="store_true",
+        help="Use source_block for unfinished plan entries instead of failing; unfinished blocks are not cached",
+    )
 
     return parser
 
@@ -381,7 +396,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "assemble":
         plan_path = require_file(args.plan)
         output_path = Path(args.output).resolve()
-        assemble_from_plan(plan_path, output_path, model=args.model)
+        assemble_from_plan(plan_path, output_path, model=args.model, fallback_source=args.fallback_source)
         return 0
 
     parser.error("unsupported command")
