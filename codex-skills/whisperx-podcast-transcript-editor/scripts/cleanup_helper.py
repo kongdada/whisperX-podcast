@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-PROMPT_ID = "cleanup-zh-v2-all-turns"
+PROMPT_ID = "cleanup-zh-v3-quality-batch"
 PLAN_VERSION = 1
 CACHE_VERSION = 1
 DEFAULT_CACHE_FILENAME = ".podcast-transcript-editor-cache.json"
@@ -214,17 +214,15 @@ def analyze_block(
         reasons.append("mixed_ascii_fragments")
         score += 1
 
-    clean_short = char_count <= 80 and end_punct_count >= 1 and punct_density >= 0.03 and not reasons
-    clean_medium = char_count <= 180 and end_punct_count >= 1 and punct_density >= 0.025 and not reasons
+    risk_reasons = set(reasons)
+    clean_short = char_count <= 110 and end_punct_count >= 2 and punct_density >= 0.035 and not risk_reasons
+    clean_medium = char_count <= 170 and end_punct_count >= 1 and punct_density >= 0.028 and not risk_reasons
 
     if clean_short or clean_medium:
         decision = "pass_through"
         reasons = reasons or ["clean_enough"]
-    elif score >= 2:
-        decision = "needs_model"
     else:
-        decision = "pass_through"
-        reasons = reasons or ["clean_enough"]
+        decision = "needs_model"
 
     return {
         "header_line": header_line,
@@ -255,7 +253,7 @@ def build_plan(
     header_text, blocks = split_transcript_markdown(markdown)
 
     rendered_blocks: list[dict[str, Any]] = []
-    stats = {"total_blocks": 0, "needs_model": 0, "from_cache": 0}
+    stats = {"total_blocks": 0, "needs_model": 0, "from_cache": 0, "pass_through": 0}
 
     for index, block in enumerate(blocks, start=1):
         prepared_block = apply_profile_replacements_to_block(block, replacements)
@@ -263,7 +261,7 @@ def build_plan(
         cache_key = cache_key_for_block(prepared_block)
         entry = cache.get("entries", {}).get(cache_key)
         cached_text = None
-        decision = "needs_model"
+        decision = analysis["decision"]
         if (
             isinstance(entry, dict)
             and entry.get("block_hash") == block_hash(prepared_block)
@@ -348,6 +346,9 @@ def assemble_from_plan(
                 rendered_blocks.append(source_block)
                 continue
             raise ValueError(f"missing cleaned_block for plan block {block.get('index')}")
+            continue
+        if decision == "pass_through":
+            rendered_blocks.append(source_block)
             continue
         raise ValueError(f"unknown decision: {decision}")
 

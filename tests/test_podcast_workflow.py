@@ -131,13 +131,14 @@ class PodcastWorkflowUnitTests(unittest.TestCase):
             pw.Segment(t0_ms=0, t1_ms=1000, text="第一段", speaker="SPEAKER_00"),
             pw.Segment(t0_ms=1000, t1_ms=2000, text="第二段", speaker="SPEAKER_00"),
             pw.Segment(t0_ms=2000, t1_ms=3000, text="第三段", speaker="SPEAKER_00"),
+            pw.Segment(t0_ms=3000, t1_ms=4000, text="第四段", speaker="SPEAKER_00"),
         ]
 
         turns = pw.merge_segments_into_turns(segments)
 
         self.assertEqual(len(turns), 2)
-        self.assertEqual(turns[0].parts, ["第一段", "第二段"])
-        self.assertEqual(turns[1].parts, ["第三段"])
+        self.assertEqual(turns[0].parts, ["第一段", "第二段", "第三段"])
+        self.assertEqual(turns[1].parts, ["第四段"])
 
     def test_lightly_punctuate_fragment_adds_commas_for_common_discourse_markers(self) -> None:
         rendered = pw.lightly_punctuate_fragment("开玩笑然后其实这事没错对吧我们再说")

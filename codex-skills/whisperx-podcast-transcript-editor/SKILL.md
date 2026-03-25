@@ -10,7 +10,7 @@ Use this skill when the user wants a podcast URL turned into a faithful cleaned 
 The workflow is intentionally split into two layers:
 
 - `01_transcript.md`: rule-generated structure draft for model consumption and rough human review
-- `02_transcript_clean.md`: final high-quality transcript, produced by running the model over every turn block unless cache already has a matching cleaned block
+- `02_transcript_clean.md`: final high-quality transcript, produced by reusing cache, passing through already-clean blocks, and batching only the risky blocks through the model
 
 ## Quick Start
 
@@ -62,7 +62,7 @@ python3 codex-skills/whisperx-podcast-transcript-editor/scripts/cleanup_helper.p
 Before editing, read:
 
 - [references/cleanup-standard.zh.md](references/cleanup-standard.zh.md)
-- [references/cleanup-prompt.zh.txt](references/cleanup-prompt.zh.txt)
+- [references/cleanup-batch-prompt.zh.txt](references/cleanup-batch-prompt.zh.txt)
 - [references/cache-format.md](references/cache-format.md)
 
 Use the bundled batch runner as the default execution path:
@@ -76,7 +76,8 @@ python3 codex-skills/whisperx-podcast-transcript-editor/scripts/run_cleanup_code
 
 This runner:
 
-- sends every unfinished `needs_model` block to `codex exec`
+- only sends unfinished `needs_model` blocks to `codex exec`
+- batches up to 3 blocks per request to reduce repeated prompt overhead
 - writes each returned `cleaned_block` back into the plan immediately
 - resumes cleanly if rerun after an interruption
 - assembles `02_transcript_clean.md` at the end
@@ -110,7 +111,8 @@ Do:
 
 - Keep the original title and header structure
 - Keep speaker labels and time ranges
-- Run the model on every turn block unless cache already contains an exact-match cleaned block
+- Let `plan` classify blocks into `from_cache`, `pass_through`, and `needs_model`
+- Only run the model on `needs_model` blocks
 - Split long paragraphs where reading becomes tiring
 - Add punctuation and sentence boundaries so the text reads like a professionally checked transcript
 - Remove obvious noise or duplicated junk only when confidence is high

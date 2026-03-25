@@ -85,7 +85,7 @@ class CleanupHelperTests(unittest.TestCase):
             plan = ch.build_plan(transcript_path, cache_path=cache_path)
             self.assertEqual(plan["header_text"], header)
             self.assertEqual(plan["stats"]["from_cache"], 1)
-            self.assertEqual(plan["stats"]["needs_model"], 1)
+            self.assertEqual(plan["stats"]["pass_through"], 1)
             dirty = plan["blocks"][1]
             self.assertEqual(dirty["decision"], "from_cache")
             self.assertIsNotNone(dirty["cleaned_block"])
@@ -114,7 +114,7 @@ class CleanupHelperTests(unittest.TestCase):
             self.assertIn("profile_replacement_hits", block["reasons"])
             self.assertIn("知行小酒馆", block["source_block"])
 
-    def test_build_plan_marks_clean_block_needs_model_by_default(self) -> None:
+    def test_build_plan_marks_clean_block_pass_through(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
             transcript_path = tmp / "01_transcript.md"
@@ -122,9 +122,10 @@ class CleanupHelperTests(unittest.TestCase):
 
             plan = ch.build_plan(transcript_path)
 
-            self.assertEqual(plan["stats"]["needs_model"], 2)
+            self.assertEqual(plan["stats"]["needs_model"], 1)
             self.assertEqual(plan["stats"]["from_cache"], 0)
-            self.assertEqual([block["decision"] for block in plan["blocks"]], ["needs_model", "needs_model"])
+            self.assertEqual(plan["stats"]["pass_through"], 1)
+            self.assertEqual([block["decision"] for block in plan["blocks"]], ["pass_through", "needs_model"])
 
     def test_assemble_writes_cleaned_output_and_updates_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -202,8 +203,9 @@ class CleanupHelperTests(unittest.TestCase):
             }
             plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, "unknown decision: pass_through"):
-                ch.assemble_from_plan(plan_path, output_path, model="gpt-4.1")
+            ch.assemble_from_plan(plan_path, output_path, model="gpt-4.1")
+            rendered = output_path.read_text(encoding="utf-8")
+            self.assertIn("这是一段已经很干净的表达。", rendered)
 
     def test_assemble_fallback_source_renders_without_caching_unfinished_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -289,10 +291,15 @@ class CleanupHelperTests(unittest.TestCase):
             plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
             def fake_run_codex_exec(prompt: str, *, model: str, output_path: Path) -> str:
-                output_path.write_text(
-                    "雨白（00:00:10 - 00:00:40）：\n这个事情就是特别重要。",
-                    encoding="utf-8",
-                )
+                payload = {
+                    "blocks": [
+                        {
+                            "index": 2,
+                            "cleaned_block": "雨白（00:00:10 - 00:00:40）：\n这个事情就是特别重要。",
+                        }
+                    ]
+                }
+                output_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
                 return output_path.read_text(encoding="utf-8")
 
             with mock.patch.object(runner, "run_codex_exec", side_effect=fake_run_codex_exec):
@@ -300,9 +307,63 @@ class CleanupHelperTests(unittest.TestCase):
 
             updated = json.loads(plan_path.read_text(encoding="utf-8"))
             self.assertEqual(stats["processed"], 1)
+            self.assertEqual(stats["batch_requests"], 1)
             self.assertEqual(updated["blocks"][1]["cleaned_block"], "雨白（00:00:10 - 00:00:40）：\n这个事情就是特别重要。")
             rendered = output_path.read_text(encoding="utf-8")
             self.assertIn("这个事情就是特别重要。", rendered)
+
+    def test_runner_builds_batches_with_limits(self) -> None:
+        blocks = [
+            {"index": 1, "decision": "needs_model", "source_block": "a" * 200},
+            {"index": 2, "decision": "needs_model", "source_block": "b" * 200},
+            {"index": 3, "decision": "pass_through", "source_block": "clean"},
+            {"index": 4, "decision": "needs_model", "source_block": "c" * 350},
+            {"index": 5, "decision": "needs_model", "source_block": "d" * 350},
+        ]
+
+        batch1 = runner.next_batch(blocks, start_pos=0, max_blocks=3, max_chars=700)
+        self.assertIsNotNone(batch1)
+        assert batch1 is not None
+        self.assertEqual(batch1.indexes, [1, 2])
+
+        batch2 = runner.next_batch(blocks, start_pos=2, max_blocks=3, max_chars=700)
+        self.assertIsNotNone(batch2)
+        assert batch2 is not None
+        self.assertEqual(batch2.indexes, [4, 5])
+
+    def test_parse_batch_response_validates_headers_and_indexes(self) -> None:
+        batch = runner.CleanupBatch(
+            blocks=[
+                {
+                    "index": 12,
+                    "header_line": "张潇雨（00:00:00 - 00:00:10）：",
+                    "source_block": "张潇雨（00:00:00 - 00:00:10）：\n原文。",
+                }
+            ]
+        )
+
+        parsed = runner.parse_batch_response(
+            json.dumps({"blocks": [{"index": 12, "cleaned_block": "张潇雨（00:00:00 - 00:00:10）：\n清洗后。"}]}, ensure_ascii=False),
+            batch,
+        )
+        self.assertEqual(parsed, [(12, "张潇雨（00:00:00 - 00:00:10）：\n清洗后。")])
+
+        with self.assertRaisesRegex(ValueError, "indexes do not match"):
+            runner.parse_batch_response(
+                json.dumps({"blocks": [{"index": 99, "cleaned_block": "张潇雨（00:00:00 - 00:00:10）：\n清洗后。"}]}, ensure_ascii=False),
+                batch,
+            )
+
+    def test_build_plan_marks_sparse_punctuation_dirty(self) -> None:
+        block = (
+            "雨白（00:00:10 - 00:00:40）：\n"
+            "这个事情特别重要如果你不这么看你就很难理解整个结构这里其实牵涉到很多层面的变化但是现在没有句号只有极少逗号"
+            "我们还要继续补充很多内容让这一段变得足够长同时依然几乎没有任何像样的句末标点"
+            "继续往下说的话你会发现这种文本读起来特别累而且机器虽然听懂了一点但是几乎没有帮你完成句子边界"
+        )
+        result = ch.analyze_block(block)
+        self.assertEqual(result["decision"], "needs_model")
+        self.assertIn("sparse_punctuation", result["reasons"])
 
 
 if __name__ == "__main__":
