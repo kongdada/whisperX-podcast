@@ -41,6 +41,99 @@ This repository provides fast automatic speech recognition (70x realtime with la
 - 👯‍♂️ Multispeaker ASR using speaker diarization from [pyannote-audio](https://github.com/pyannote/pyannote-audio) (speaker ID labels)
 - 🗣️ VAD preprocessing, reduces hallucination & batching with no WER degradation
 
+## 这个 Fork 做了什么
+
+如果把 `WhisperX` 看成一个很强的语音转录底座，那这个 fork 做的事情，就是在它上面补齐了一套“播客可直接使用”的工作流。
+
+### 1. WhisperX 是什么
+
+`WhisperX` 本身解决的是语音转录底层能力：
+
+- 把音频转成文字
+- 给文字补更准确的时间戳
+- 做说话人分离，知道哪一段是谁在说
+
+对普通用户来说，可以把它理解成：
+
+> 一个很强的“语音转文字 + 时间对齐 + 说话人切分”引擎。
+
+它很擅长处理长音频，但它原生更像一个技术底座，不是一套专门面向播客生产的完整流程。
+
+### 2. 我们基于它做了什么
+
+我们在 `WhisperX` 之上，补了一整套播客转录与精校链路，让输入一个播客链接这件事，最终能稳定落到一份可读的稿子上。
+
+具体补了这些能力：
+
+- 支持从小宇宙、Apple Podcasts 这类播客 URL 直接下载音频
+- 自动完成转码、WhisperX 转写、时间对齐和说话人分离
+- 生成结构化中间稿 `01_transcript.md`
+- 基于 profile 做说话人名称映射、术语替换和噪声过滤
+- 通过 repo-local skill 做忠实精校，生成最终稿 `02_transcript_clean.md`
+- 用 cache 和批量精校减少重复清洗和无意义的 token 消耗
+
+最终你会得到这些产物：
+
+- `audio.mp3`
+- `01_transcript.json`
+- `01_diarization.json`
+- `01_transcript.md`
+- `02_transcript_clean.md`
+
+### 3. 我们是怎么做的
+
+能力分工大概可以这样看：
+
+```mermaid
+flowchart LR
+    A["WhisperX<br/>转写 / 时间对齐 / 说话人分离"] --> B["本 fork<br/>播客下载 / 结构化产物 / 精校工作流"]
+    B --> C["最终可读稿<br/>02_transcript_clean.md"]
+```
+
+端到端工作流是这样的：
+
+```mermaid
+flowchart TD
+    A["播客 URL"] --> B["下载音频"]
+    B --> C["WhisperX 转写 / 对齐 / 分离"]
+    C --> D["输出 01_transcript.md"]
+    D --> E["plan"]
+    E --> F["批量精校"]
+    F --> G["输出 02_transcript_clean.md"]
+```
+
+如果用一句更直白的话来讲：
+
+> `WhisperX` 负责把音频听明白，我们这个 fork 负责把它变成一份真正能交付、能阅读、能继续编辑的播客稿。
+
+其中：
+
+- `01_transcript.md` 是结构稿  
+  它已经带有 speaker、时间范围和较小 turn，适合作为后续清洗输入
+- `02_transcript_clean.md` 是最终稿  
+  它会在忠实原文的前提下补标点、断句、拆段，让整篇稿子更像人能读的版本
+
+### 4. 怎么开始
+
+如果你只想最快跑通一次，可以直接用这三步：
+
+```bash
+python3 scripts/podcast_workflow.py --url "<podcast-url>"
+python3 codex-skills/whisperx-podcast-transcript-editor/scripts/cleanup_helper.py plan \
+  "<output-dir>/01_transcript.md" \
+  --output "<output-dir>/cleanup-plan.json"
+python3 codex-skills/whisperx-podcast-transcript-editor/scripts/run_cleanup_codex.py \
+  "<output-dir>/cleanup-plan.json" \
+  --output "<output-dir>/02_transcript_clean.md" \
+  --model "gpt-5.4"
+```
+
+如果你要看更详细的中文说明，不用在首页里翻工程细节，直接看这些文档：
+
+- 播客工作流说明：[scripts/README.podcast_workflow.zh.md](scripts/README.podcast_workflow.zh.md)
+- profile 说明：[scripts/podcast_profiles/README.md](scripts/podcast_profiles/README.md)
+- 精校 skill 说明：[codex-skills/whisperx-podcast-transcript-editor/SKILL.md](codex-skills/whisperx-podcast-transcript-editor/SKILL.md)
+
 **Whisper** is an ASR model [developed by OpenAI](https://github.com/openai/whisper), trained on a large dataset of diverse audio. Whilst it does produces highly accurate transcriptions, the corresponding timestamps are at the utterance-level, not per word, and can be inaccurate by several seconds. OpenAI's whisper does not natively support batching.
 
 **Phoneme-Based ASR** A suite of models finetuned to recognise the smallest unit of speech distinguishing one word from another, e.g. the element p in "tap". A popular example model is [wav2vec2.0](https://huggingface.co/facebook/wav2vec2-large-960h-lv60-self).
